@@ -1,12 +1,9 @@
-// Tiny stack VM for make.fun's tiny-stack-vm-01 (22 November 2026 run).
-// A complete interpreter for the kit's tiny stack ISA: wrapping 32-bit
-// arithmetic, exact unsigned operations, every trap code, and the step
-// and output limits, following ISA.md rule by rule.
+// Tiny stack VM for make.fun's tiny-stack-vm-01: a complete interpreter
+// for the kit's tiny stack ISA, following ISA.md rule by rule.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-// Immediate length, data-stack pops and pushes for each opcode byte.
-// A length of -1 marks a byte that is not an opcode at all.
+// Immediate length (IMM -1 = not an opcode), pops and pushes per opcode.
 const IMM = new Int8Array(256).fill(-1);
 const POPS = new Int8Array(256);
 const PUSHES = new Int8Array(256);
@@ -55,14 +52,13 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
 
   for (;;) {
     // One step, in ISA.md's order: step limit, pc bounds, opcode,
-    // immediate fit, then the instruction's stack needs, then its traps.
+    // immediate fit, stack needs, then the instruction's own traps.
     if (steps === 1000000) return finish(10);
     if (pc < 0 || pc >= program.length) return finish(9);
     const op = program[pc];
     const imm = IMM[op];
     if (imm < 0) return finish(5);
-    if (pc + imm >= program.length && imm > 0) return finish(9);
-    if (imm === 0 && pc >= program.length) return finish(9);
+    if (imm > 0 && pc + imm >= program.length) return finish(9);
     steps++;
     if (sp < POPS[op]) return finish(2);
     if (sp - POPS[op] + PUSHES[op] > 256) return finish(3);
@@ -71,10 +67,10 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
     switch (op) {
       case 0x00: // HALT
         return finish(0);
-      case 0x01: // PUSH8, sign-extended
+      case 0x01: // PUSH8
         stack[sp++] = (program[pc + 1] << 24) >> 24;
         break;
-      case 0x02: // PUSH32, little-endian
+      case 0x02: // PUSH32
         stack[sp++] = program[pc + 1] | (program[pc + 2] << 8) | (program[pc + 3] << 16) | (program[pc + 4] << 24);
         break;
       case 0x03: // POP
@@ -115,17 +111,17 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
         let r = 0;
         if (op === 0x10) r = (a + b) | 0;
         else if (op === 0x11) r = (a - b) | 0;
-        else if (op === 0x12) r = Math.imul(a, b); // exact low 32 bits
-        else if (op === 0x13) { // DIV, signed, truncated toward zero
+        else if (op === 0x12) r = Math.imul(a, b);
+        else if (op === 0x13) { // DIV
           if (b === 0) return finish(4);
           r = a === -2147483648 && b === -1 ? a : Math.trunc(a / b) | 0;
-        } else if (op === 0x14) { // MOD, sign of the dividend
+        } else if (op === 0x14) { // MOD
           if (b === 0) return finish(4);
           r = b === -1 ? 0 : (a % b) | 0;
-        } else if (op === 0x15) { // DIVU, unsigned
+        } else if (op === 0x15) { // DIVU
           if (b === 0) return finish(4);
           r = Math.floor((a >>> 0) / (b >>> 0)) | 0;
-        } else if (op === 0x16) { // MODU, unsigned
+        } else if (op === 0x16) { // MODU
           if (b === 0) return finish(4);
           r = ((a >>> 0) % (b >>> 0)) | 0;
         } else if (op === 0x18) r = a & b;
@@ -136,12 +132,12 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
         else if (op === 0x1e) r = (a >>> (b & 31)) | 0;
         else if (op === 0x20) r = a === b ? 1 : 0;
         else if (op === 0x21) r = a < b ? 1 : 0;
-        else r = (a >>> 0) < (b >>> 0) ? 1 : 0; // LTU, unsigned
+        else r = (a >>> 0) < (b >>> 0) ? 1 : 0; // LTU
         sp--;
         stack[sp - 1] = r;
         break;
       }
-      case 0x30: case 0x31: case 0x32: { // JMP / JZ / JNZ, signed relative offset
+      case 0x30: case 0x31: case 0x32: { // JMP / JZ / JNZ
         const rel = ((program[pc + 1] | (program[pc + 2] << 8)) << 16) >> 16;
         let take = op === 0x30;
         if (op !== 0x30) {
@@ -151,7 +147,7 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
         pc = take ? next + rel : next;
         continue;
       }
-      case 0x33: // CALL, unsigned absolute address
+      case 0x33: // CALL
         if (csp === 64) return finish(7);
         calls[csp++] = next;
         pc = program[pc + 1] | (program[pc + 2] << 8);
@@ -166,14 +162,14 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
         stack[sp - 1] = memory[addr];
         break;
       }
-      case 0x41: { // STORE: ( v addr -- )
+      case 0x41: { // STORE
         const addr = stack[sp - 1];
         if (addr < 0 || addr > 255) return finish(6);
         memory[addr] = stack[sp - 2];
         sp -= 2;
         break;
       }
-      case 0x50: { // PRINT, decimal ASCII
+      case 0x50: { // PRINT
         const bytes = encoder.encode(String(stack[sp - 1]));
         if (outLen + bytes.length > 65536) return finish(11);
         sp--;
@@ -181,14 +177,14 @@ function run(program: Uint8Array, input: Uint8Array): { out: Uint8Array; code: n
         outLen += bytes.length;
         break;
       }
-      case 0x51: // PUTC, one byte
+      case 0x51: // PUTC
         if (outLen + 1 > 65536) return finish(11);
         out[outLen++] = stack[--sp] & 255;
         break;
-      case 0x52: // IN, -1 at and after the end of the input
+      case 0x52: // IN
         stack[sp++] = inPos < input.length ? input[inPos++] : -1;
         break;
-      case 0x53: // EXIT, low byte only
+      case 0x53: // EXIT
         return finish(stack[--sp] & 255);
     }
     pc = next;
